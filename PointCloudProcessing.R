@@ -21,6 +21,10 @@ library(lidR)         # LIDAR manipulation tools
 library(gstat)        # Geostatistical data modeling package (used to determine tree tops)
 library(rstac)
 library(RCSF)         # Needed for some of the LIDAR algorithms
+
+# Mapping libraries
+library(rayshader)    # For making cool looking plots with DTM's
+library(ambient)
 library(lidRviewer)   # Better LIDAR viewer
 
 # WD and LAS data path 
@@ -40,7 +44,7 @@ las_output_path <- paste0("C:/LIDARData/MendocinoTreeMapping/LIDAROutput")
 # doesn't work with catalogs. So we are just going to use a for loop. 
 
 # Find the output directory for the files. Create beforehand if you haven't already
-conversion_output_directory <- paste0(las_output_path, "01_converted_m", sep="") 
+conversion_output_directory <- paste0(las_output_path, "/01_converted_m", sep="") 
 # Get a list of the files
 raw_files_ft <- list.files(paste0(las_data_path, "/LIDARPointClouds"), pattern = "\\.la[sz]$", full.names = TRUE)
 
@@ -95,7 +99,7 @@ process_ctg2 <- readLAScatalog(paste0(las_output_path, "/03_classified_noise"))
 
 # (Optional) tune chunking/buffer for ground algorithms
 opt_chunk_size(process_ctg2)   <- 0  # meters, example
-opt_chunk_buffer(process_ctg2) <- 0.01
+opt_chunk_buffer(process_ctg2) <- 10
 
 # Choose a ground algorithm (PMF or CSF are common)
 # PMF example:
@@ -120,11 +124,14 @@ process_ctg3 <- readLAScatalog(paste0(las_output_path, "/02_classified_noise"))
 opt_output_files(process_ctg3) <- paste0(las_output_path, "/04_noise_free/{ORIGINALFILENAME}")
 
 # Drop noise classes on read while copying
-opt_filter(process_ctg3) <- "-drop_classification 7 18"
+# Noise classes are 7 and 18, while 6 is the building class. We are going to drop that, 
+# so we don't include buildings in our analysis. However, this shouldn't be a problem at all, 
+# since we will later filter for only the two state parks we are working at. 
+opt_filter(process_ctg3) <- "-drop_classification 6 7 18" 
 # opt_laz_compression(process_ctg3) <- TRUE
 opt_independent_files(process_ctg3) <- TRUE
 opt_chunk_size(process_ctg3) <- 0
-opt_chunk_buffer(process_ctg3) <- 0.01
+opt_chunk_buffer(process_ctg3) <- 10
 
 # copy filtered chunks to disk; skip empty ones
 copy_fun <- function(chunk) {
@@ -135,6 +142,75 @@ copy_fun <- function(chunk) {
   las                             # returning a LAS lets lidR write it to disk
 }
 catalog_apply(process_ctg3, copy_fun)
+
+# ---------- 4) Load in the final, noise-free catalog ----------
+
+# Load in files from the cluster
+# ctg <- readLAScatalog(paste0(las_output_path, "/04_noise_free_cluster"))
+
+# Load in files using ground classified pieces from USGS. 
+ctg <- readLAScatalog(paste0(las_output_path, "/04_noise_free"))
+
+############################################################################
+# Creating a DTM (or DEM)
+
+# We now need to create a DEM before creating our canopy maps and finding 
+# individual trees. There are several methods of doing this - I will post two
+# different algorithms we can use for the DTM. Both will be run through the cluster
+
+# Faster for creating DTM's, and we have enough edges to warrant inverse 
+# spatial interpolation vs TIN. 
+dtm <- rasterize_terrain(ctg, res = 1, algorithm = knnidw(k = 10L, p = 2))
+
+# Best algorithm for creating DTM's. However, extremely computationally intensive
+dtm <- rasterize_terrain(ctg, res=0.5, kriging())
+
+# Algorithm to make a quick DEM using TIN
+dtm_tin <- rasterize_terrain(ctg, res=1, algorithm=tin())
+
+writeRaster(dtm_tin, paste0(las_output_path, "/dem.tif"))
+
+
+############################################################################
+# Playing around with the DEM
+
+# First, read in the DEM
+
+dtm <- rast("C:/LIDARData/MendocinoTreeMapping/LIDAROutput/dem.tif")
+
+plot(dtm_tin)
+plot_dtm3d(dtm_tin)
+
+# Let's use rayshade!
+
+# First, convert into a matrix
+
+elmat <- raster_to_matrix(dtm_tin)
+
+# Now let's make plots! I will comment on all the changes I make
+
+elmat |> 
+  sphere_shade(texture = "imhof1") |>
+  # add_water(detect_water(elmat), color = "desert") |>
+  add_shadow(ray_shade(elmat), 0.5) |>
+  add_shadow(ambient_shade(elmat, maxsearch = 30), 0) |>
+  # plot_map() |>
+  plot_3d(
+    elmat, 
+    zscale = 0, 
+    fov = 0, 
+    theta = 45, 
+    zoom = 0.75, 
+    phi = 45, 
+    windowsize = c(1000, 800), 
+    water = TRUE, 
+    waterdepth = 10, 
+    watercolor = "lightblue", 
+    wateralpha = 0.5
+  )
+
+
+
 
 
 
